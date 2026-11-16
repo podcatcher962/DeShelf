@@ -927,11 +927,12 @@ class App:
     # ------------------------------------------------------------ 书库
     def add_book(self, info):
         idx = len(self.books)
+        info.setdefault("chapters", -1)      # 章数字段：-1 = 尚未试分
         self.books.append(info)
         rel = info.get("rel", os.path.basename(info["path"]))
         self.tv.insert("", "end", iid=str(idx), values=(
             "✓" if info["sel"] else "", info["title"], info["author"],
-            "{:,}".format(info["chars"]), info["enc"], "-",
+            "{:,}".format(info["chars"]), info["enc"], self.chap_cell(info),
             jzcore.human_size(info["size"]), rel))
         self.refresh_info()
 
@@ -944,6 +945,35 @@ class App:
             s += self.S["lib_info_dup"].format(d)
         self.info_var.set(s)
 
+    def chap_cell(self, b):
+        """书库「章节」列的显示值：未试分显示 -，试分后显示已切出的章数。
+
+        章数唯一来源是书籍字典的 chapters 字段（scan_file 预置 -1），
+        ③ 分章页试分后写回这里，① 书库列表据此渲染，两页共用同一份状态。
+        """
+        try:
+            n = int(b.get("chapters", -1))
+        except (TypeError, ValueError):
+            n = -1
+        return str(n) if n >= 0 else "-"
+
+    def _set_book_chaps(self, b, n):
+        """把试分结果写回书籍状态，并即时刷新①书库对应行的「章节」单元格。"""
+        b["chapters"] = n
+        try:
+            iid = str(self.books.index(b))
+        except ValueError:
+            return
+        if self.tv.exists(iid):
+            self.tv.set(iid, "chap", self.chap_cell(b))
+
+    def refresh_chap_col(self):
+        """按 books 快照重灌全部「章节」单元格（切回①书库时与分章页对齐）。"""
+        for i, b in enumerate(self.books):
+            iid = str(i)
+            if self.tv.exists(iid):
+                self.tv.set(iid, "chap", self.chap_cell(b))
+
     def reload_rows(self):
         """按 books 快照整表重灌（批量清洗改 chars 后刷新书库列表）。"""
         for row in self.tv.get_children():
@@ -951,7 +981,7 @@ class App:
         for i, b in enumerate(self.books):
             self.tv.insert("", "end", iid=str(i), values=(
                 "✓" if b["sel"] else "", b["title"], b["author"],
-                "{:,}".format(b["chars"]), b["enc"], "-",
+                "{:,}".format(b["chars"]), b["enc"], self.chap_cell(b),
                 jzcore.human_size(b["size"]), b.get("rel", os.path.basename(b["path"]))))
 
     def dup_count(self):
@@ -1143,6 +1173,8 @@ class App:
                 "books": [{k: v for k, v in b.items() if k != "path"} for b in self.books]})
         elif kind == "run":
             _s, ok, fail, outdir = payload
+            self.reload_rows()          # 回写实际切分章数/字数后重灌书库列表
+            self.mark_dup()
             self.status_var.set(S["st_run_done"].format(ok, fail))
             self.log(S["log_run_done"].format(ok, fail) + "，输出目录 %s" % outdir)
             if outdir and os.path.isdir(outdir) and not self.cancel:
@@ -1232,6 +1264,7 @@ class App:
                 text, removed = jzcore.clean_text(text, rules)
                 b["_clean"] = text          # 清洗快照：分章/导出优先使用（与 Web 版一致）
                 b["chars"] = len(text)
+                b["chapters"] = -1          # 正文已变，旧章数作废（与 Web 版一致）
                 rm_sum += removed
                 ok += 1
             except Exception as e:
@@ -1262,12 +1295,15 @@ class App:
         return self.first_selected()
 
     def _on_tab_changed(self, _e=None):
-        """切到 ③ 分章页时同步试分书下拉。"""
+        """切换页签时对齐两页共享状态：③ 同步试分下拉，① 重刷「章节」列。"""
         try:
-            if self.nb.index("current") == 2:
-                self._fill_chap_pick()
+            idx = self.nb.index("current")
         except Exception:
-            pass
+            return
+        if idx == 2:
+            self._fill_chap_pick()
+        elif idx == 0:
+            self.refresh_chap_col()
 
     def preview_chap(self):
         S = self.S
@@ -1297,6 +1333,7 @@ class App:
             self.tv_chap.insert("", "end", values=(i, t, "{:,}".format(len(body))))
         total = sum(len(x[1]) for x in chapters)
         self.chap_var.set(S["chap_sum"].format(b["title"], len(chapters), "{:,}".format(total)))
+        self._set_book_chaps(b, len(chapters))      # 写回书籍状态 → ① 书库「章节」列同步
         self.log("《%s》试分 %d 章" % (b["title"], len(chapters)))
 
     def _chap_cols(self, batch):
@@ -1339,7 +1376,9 @@ class App:
                 continue
             ok_n += 1
             sum_n += len(chapters)
+            self._set_book_chaps(b, len(chapters))      # 逐本写回，书库「章节」列即时可见
             self.tv_chap.insert("", "end", values=(ok_n, b["title"], str(len(chapters))))
+        self.refresh_chap_col()
         self.chap_var.set(S["chap_all_done"].format(ok_n, sum_n, bad))
         self.log("批量试分：%d 本成功 · %d 本异常 · 共 %d 章" % (ok_n, bad, sum_n))
 
@@ -1409,6 +1448,7 @@ class App:
                         if rules:
                             text, removed = jzcore.clean_text(text, rules)
                 chapters = jzcore.split_chapters(text, custom)
+                b["chapters"] = len(chapters)       # 实际切分结果回写，供①书库展示
                 title = b["title"] or os.path.splitext(b["name"])[0]
                 base = safe_name(title, fallback=S["unnamed"])
                 if mode == "inplace":
