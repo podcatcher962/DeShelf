@@ -186,6 +186,8 @@ TEXTS = {
         "chap_res": "点「试分章节」查看结果",
         "chap_all_done": "试分 {0} 本：共 {1} 章，异常 {2} 本（见日志）",
         "chap_sum": "《{0}》共切出 {1} 章，正文合计 {2} 字",
+        "prog_chap": "试分中 {0}/{1}：《{2}》",
+        "st_chap_done": "试分完成：{0} 本成功 · 共 {1} 章 · 异常 {2} 本",
         # 页4 导出
         "grp_where": "清洗结果的去向",
         "r_new": "输出到新目录（原文件不动，推荐）",
@@ -223,6 +225,11 @@ TEXTS = {
         "log_csv_ok": "书单已导出：{0}",
         "log_dup_sel": "已选中 {0} 个重复文件，可在书库中取消保留项的勾选后清理。",
         "log_out_final": "原地覆盖",
+        "log_chap_start": "开始批量试分：共 {0} 本 · 清洗规则 {1} 条 · 章节规则 {2}",
+        "log_chap_builtin": "内置规则库",
+        "log_chap_per_book": "[{0}/{1}]《{2}》切出 {3} 章，正文 {4} 字",
+        "log_chap_book_fail": "[{0}/{1}]《{2}》试分失败：{3}",
+        "log_chap_done": "批量试分完成：{0} 本成功 · {1} 本异常 · 共 {2} 章",
         # 对话框
         "d_info": "提示", "d_warn": "警告", "d_error": "错误", "d_confirm": "确认",
         "d_close": "关闭",
@@ -300,6 +307,13 @@ TEXTS = {
         "chap_res": "Click \u201cTry Split\u201d to preview",
         "chap_all_done": "Tried {0} books: {1} chapters in total, {2} failed (see log)",
         "chap_sum": "\u201c{0}\u201d: {1} chapters, {2} chars total",
+        "prog_chap": "Splitting {0}/{1}: {2}",
+        "st_chap_done": "Split done: {0} books · {1} chapters · {2} failed",
+        "log_chap_start": "Batch split started: {0} books · {1} cleaning rules · chapter regex: {2}",
+        "log_chap_builtin": "built-in rule set",
+        "log_chap_per_book": "[{0}/{1}] {2}: {3} chapters, {4} chars",
+        "log_chap_book_fail": "[{0}/{1}] {2} failed: {3}",
+        "log_chap_done": "Batch split done: {0} books ok · {1} failed · {2} chapters in total",
         "grp_where": "Where Cleaned Text Goes",
         "r_new": "Output to a new folder (originals untouched, recommended)",
         "r_inplace": "Overwrite in place (.bak backup first)",
@@ -724,10 +738,12 @@ class App:
         ttk.Label(top, text=S["re_label"]).pack(side="left")
         e = ttk.Entry(top, textvariable=self.custom_re)
         e.pack(side="left", fill="x", expand=True, padx=px(4))
-        ttk.Button(top, text=S["b_try"], style="Accent.TButton",
-                   command=self.preview_chap).pack(side="left")
-        ttk.Button(top, text=S["b_try_all"],
-                   command=self.preview_chap_all).pack(side="left", padx=(px(6), 0))
+        self.btn_chap_try = ttk.Button(top, text=S["b_try"], style="Accent.TButton",
+                                       command=self.preview_chap)
+        self.btn_chap_try.pack(side="left")
+        self.btn_chap_all = ttk.Button(top, text=S["b_try_all"],
+                                       command=self.preview_chap_all)
+        self.btn_chap_all.pack(side="left", padx=(px(6), 0))
         pick = ttk.Frame(f)
         pick.pack(fill="x", padx=px(8), pady=(px(2), 0))
         ttk.Label(pick, text=S["lab_chap_pick"]).pack(side="left")
@@ -820,6 +836,14 @@ class App:
                     self.logbox.see("end")
                 elif kind == "book":
                     self.add_book(payload)
+                elif kind == "chaprow":
+                    # 批量试分逐本回填：先写回书籍章数（①书库同步），再追加③页结果行
+                    n, b, cnt = payload
+                    self._set_book_chaps(b, cnt)
+                    if hasattr(self, "tv_chap"):
+                        self.tv_chap.insert("", "end",
+                                            values=(n, b["title"] or os.path.splitext(b["name"])[0],
+                                                    str(cnt)))
                 elif kind == "prog":
                     cur, total, label = payload
                     self.prog_var.set(0 if not total else cur * 100.0 / total)
@@ -835,6 +859,10 @@ class App:
         self.busy = busy
         self.btn_stop.configure(state="normal" if busy else "disabled")
         self.btn_go.configure(state="disabled" if busy else "normal")
+        # 分章页按钮同步禁用：批量试分/分章与导出、清洗共用同一套后台任务与「停止」
+        for b in (getattr(self, "btn_chap_try", None), getattr(self, "btn_chap_all", None)):
+            if b is not None:
+                b.configure(state="disabled" if busy else "normal")
 
     def do_stop(self):
         self.cancel = True
@@ -1188,6 +1216,14 @@ class App:
             self.status_var.set(S["st_clean_done"].format(ok, "{:,}".format(rm_sum)))
             self.log(S["log_clean_done"].format(ok, "{:,}".format(rm_sum))
                      + (S["log_stopped"] if cancelled else ""))
+        elif kind == "chap":
+            _s, ok_n, sum_n, bad, cancelled = payload
+            self.refresh_chap_col()
+            self.chap_var.set(S["chap_all_done"].format(ok_n, sum_n, bad))
+            st = S["st_chap_done"].format(ok_n, sum_n, bad)
+            self.status_var.set(st + (S["log_stopped"] if cancelled else ""))
+            self.log(S["log_chap_done"].format(ok_n, bad, sum_n)
+                     + (S["log_stopped"] if cancelled else ""))
 
     # ------------------------------------------------------------ 预览
     def first_selected(self):
@@ -1347,40 +1383,64 @@ class App:
         self._chap_batch = batch
 
     def preview_chap_all(self):
-        """批量试分：对书库中所有勾选的书籍逐本切章，结果按 序号/书名/章节 列出。"""
+        """批量试分：对书库中所有勾选的书籍逐本切章，结果按 序号/书名/章节 列出。
+
+        与「导出分发」一致：真实切章放到后台线程，进度经队列回传主线程，
+        底栏 status_var 实时刷新，运行日志逐本输出一行；「停止」按钮可中断。
+        """
         S = self.S
         sel = [b for b in self.books if b["sel"]]
         if not sel:
             messagebox.showinfo(S["d_no_sel"], S["d_no_sel_msg"])
             return
+        if self.busy:
+            return
+        # 正则/清洗规则必须在主线程预取：tk 变量在线程内读取会 RuntimeError
         custom = self.custom_re.get().strip() or None
+        rules = self.active_rules()
+        try:
+            jzcore.split_chapters("", custom)       # 空文本秒过，仅校验自定义正则语法
+        except ValueError as e:
+            messagebox.showerror(S["d_re_bad"], str(e))
+            return
         self._chap_cols(True)
         for i in self.tv_chap.get_children():
             self.tv_chap.delete(i)
+        self.set_busy(True)
+        self.cancel = False
+        self.status_var.set(S["prog_chap"].format(0, len(sel), sel[0]["title"]))
+        self.log(S["log_chap_start"].format(len(sel), len(rules),
+                                            custom or S["log_chap_builtin"]))
+        threading.Thread(target=self.chap_worker,
+                         args=(sel, custom, rules), daemon=True).start()
+
+    def chap_worker(self, sel, custom, rules):
+        S = self.S
+        total = len(sel)
         ok_n = sum_n = bad = 0
-        for b in sel:
+        for i, b in enumerate(sel, 1):
+            if self.cancel:
+                break
+            name = b["title"] or os.path.splitext(b["name"])[0]
+            self.q.put(("prog", (i - 1, total, S["prog_chap"].format(i, total, name))))
             try:
                 text = b.get("_clean")
                 if text is None:
                     text = jzcore.load_text(b["path"])
-                    rules = self.active_rules()
                     if rules:
                         text, _r = jzcore.clean_text(text, rules)
                 chapters = jzcore.split_chapters(text, custom)
-            except ValueError as e:
-                messagebox.showerror(S["d_re_bad"], str(e))
-                return
             except Exception as e:
                 bad += 1
-                self.log("《%s》试分失败：%s" % (b["title"], e))
+                self.q.put(("log", S["log_chap_book_fail"].format(i, total, name, e)))
                 continue
             ok_n += 1
             sum_n += len(chapters)
-            self._set_book_chaps(b, len(chapters))      # 逐本写回，书库「章节」列即时可见
-            self.tv_chap.insert("", "end", values=(ok_n, b["title"], str(len(chapters))))
-        self.refresh_chap_col()
-        self.chap_var.set(S["chap_all_done"].format(ok_n, sum_n, bad))
-        self.log("批量试分：%d 本成功 · %d 本异常 · 共 %d 章" % (ok_n, bad, sum_n))
+            self.q.put(("chaprow", (ok_n, b, len(chapters))))   # 主线程写回章数 + 追加结果行
+            self.q.put(("log", S["log_chap_per_book"].format(
+                i, total, name, len(chapters), "{:,}".format(len(text)))))
+        self.q.put(("prog", (total, total, S["prog_done"])))
+        self.q.put(("done", ("chap", ok_n, sum_n, bad, self.cancel)))
 
     # ------------------------------------------------------------ 执行
     def start_run(self):
