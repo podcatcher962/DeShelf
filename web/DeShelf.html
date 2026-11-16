@@ -645,32 +645,96 @@ const Core = (() => {
   }
 
   /* ---------- 元信息推断（对齐 guess_meta） ---------- */
-  const RE_TITLE=/^\s*(?:书名|标题|题目|小说名)\s*[:：]\s*(.+?)\s*$/;
-  const RE_AUTHOR=/^\s*(?:作者|作\s*者)\s*[:：]\s*(.+?)\s*$/;
+  /* 正文里的字段标识：可以在行首，也可以跟在同一行前一个字段后面（用空白或分隔符隔开），
+     但前面必须是空白/分隔符，免得把「这本书的作者：某某」这类叙述句当成元信息 */
   const RE_BRACKET=/《(.+?)》/;
+  const AUTHOR_KEYS=["作者","著者","编者","编著","著"];
+  const LABEL_HEAD="(?:^|[\\s\\u3000,，;；、|｜\\/／])";
+  const TITLE_LABELS="(?:书名|标题|题\\s*目|小说名)";
+  const AUTHOR_LABELS="(?:作者|作\\s*者)";
+  const FIELD_LABELS="(?:"+TITLE_LABELS+"|"+AUTHOR_LABELS+")";
+  const RE_TITLE=new RegExp(LABEL_HEAD+TITLE_LABELS+"\\s*[:：]\\s*");
+  const RE_AUTHOR=new RegExp(LABEL_HEAD+AUTHOR_LABELS+"\\s*[:：]\\s*");
+  /* 同一行挤着多个字段时，值到此为止 */
+  const FIELD_END=new RegExp("\\s*"+FIELD_LABELS+"\\s*[:：]");
+  /* 零宽/BOM/方向控制符，常混在下载来的文件名里 */
+  const INVIS_RE=/[\uFEFF\u200B-\u200F\u2028\u2029\u2060]/g;
+  /* 版本/来源类标签，出现在方括号或标识后面时不是作者 */
+  const META_TAGS=new Set(["全本","全集","全书","完本","完结","完结本","连载","精校","精校版", "校对","校对版","修订版","珍藏版","收藏版","无删减","未删节","手打","手打版", "全文","全文字","txt","text","下载","免费","最新章节"]);
+  /* 占位词：出现了也不算识别出作者 */
+  const AUTHOR_BAD=new Set(["未知","佚名","无名","不详","暂无","无","作者","n/a","na", "unknown","null","none"]);
+
+  function authorRe(keys){
+    /* 标识后必须跟冒号或空白（否则「著作权法」会被误判）；
+       名字里碰到下一个「作者：」就停，免得「作者：甲作者：乙」拼成「甲作者」 */
+    const body=(keys&&keys.length?keys:AUTHOR_KEYS).slice()
+      .sort((a,b)=>b.length-a.length)
+      .map(k=>k.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|");
+    return new RegExp("(?:"+body+")\\s*(?:[:：]\\s*|\\s+)"
+      +"((?:(?!(?:"+body+")\\s*[:：])[^\\s\\[\\]【】()（）《》_\\-—－:：,，。;；、])+)");
+  }
+  /* 把字段值截到下一个「书名：」「作者：」等标识之前，并去掉残留分隔符 */
+  function cutField(s){
+    const m=(s||"").match(FIELD_END);
+    if(m) s=s.slice(0,m.index);
+    return s.replace(/^[\s\u3000,，;；|｜\/／、]+|[\s\u3000,，;；|｜\/／、]+$/g,"");
+  }
+  function fieldValue(line,re){
+    const m=line.match(re);
+    return m ? cutField(line.slice(m.index+m[0].length)) : "";
+  }
+  /* 清洗作者串，去掉扩展名残留、书名号、多余空格与不可见字符 */
+  function cleanAuthor(s){
+    s=(s||"").replace(INVIS_RE,"").trim().replace(/(?:\.(?:txt|text))+$/i,"");
+    s=s.replace(/^[\s\u3000\-—－_·.,，。;；:：、<>《》|｜\/／"'“”‘’]+|[\s\u3000\-—－_·.,，。;；:：、<>《》|｜\/／"'“”‘’]+$/g,"");
+    s=s.replace(/\s+/g," ").trim();
+    if(!s||s.length>20||/^[0-9０-９]+$/.test(s)) return "";
+    if(AUTHOR_BAD.has(s.toLowerCase())||META_TAGS.has(s)) return "";
+    return s;
+  }
   function cleanName(name){
     name=name.replace(/[（(][^（）()]*?[）)]|\[[^\]]*\]|\.txt$/gi,"");
     name=name.replace(/[_\-—－]+/g," ");
     return name.replace(/\s+/g," ").trim();
   }
-  function guessMeta(name,text){
-    const base=name.replace(/\.(txt|text)$/i,"");
+  function guessMeta(name,text,authorKeys){
     let title="",author="";
-    const head=text.split(/\r\n|\r|\n/).slice(0,25);
+    /* 1) 正文优先：前 25 行里的「书名：」「作者：」，同一行有多个字段也能分别取到 */
+    const head=(text||"").split(/\r\n|\r|\n/).slice(0,25);
     for(const line of head){
-      let m=line.match(RE_TITLE); if(m&&!title) title=m[1].trim();
-      m=line.match(RE_AUTHOR); if(m&&!author) author=m[1].trim();
+      if(!title){const v=fieldValue(line,RE_TITLE); if(v) title=v;}
+      if(!author){const a=cleanAuthor(fieldValue(line,RE_AUTHOR)); if(a) author=a;}
     }
-    m=base.match(RE_BRACKET); if(m&&!title) title=m[1].trim();
+    /* 2) 文件名：去掉 BOM/隐藏字符与所有 .txt 尾巴，只留主名 */
+    let base=String(name||"").replace(INVIS_RE,"").replace(/^.*[\\\/]/,"");
+    base=base.replace(/(?:\.(?:txt|text))+$/i,"");
+    const mb=base.match(RE_BRACKET);
+    if(mb&&!title){const t=mb[1].trim(); if(t) title=t;}
+    /* 3) 文件名：方括号里的名字（[作者]书名 / 书名[作者]），圆括号多是版本信息不算 */
     let rest=base.replace(/《.+?》/g,"");
+    const RE_BA=/[\[【]([^\[\]【】]{1,20})[\]】]/g;
+    let m=RE_BA.exec(rest);
+    while(m){
+      const cand=cleanAuthor(m[1]);
+      if(cand){ if(!author) author=cand; rest=rest.split(m[0]).join(" "); break; }
+      m=RE_BA.exec(rest);
+    }
+    /* 4) 文件名：「作者：xxx」等标识，只认第一个；正文已有作者时也照样剔出书名 */
+    const m4=rest.match(authorRe(authorKeys));
+    if(m4){
+      if(!author){const cand=cleanAuthor(m4[1]); if(cand) author=cand;}
+      rest=rest.split(m4[0]).join(" ");
+    }
     rest=cleanName(rest);
     if(rest){
       const parts=rest.split(" ").filter(Boolean);
-      if(!title) title=parts[0];
-      if(!author&&parts.length>=2){const cand=parts[parts.length-1];
-        if(cand.length>1&&cand.length<=12&&!/^\d+$/.test(cand)) author=cand;}
+      if(!title&&parts.length) title=parts[0];
+      if(!author&&parts.length>=2){
+        const cand=cleanAuthor(parts[parts.length-1]);
+        if(cand&&cand.length>1&&cand.length<=12) author=cand;
+      }
     }
-    if(!title){title=cleanName(base)||base;}
+    if(!title) title=cleanName(base)||base;
     return {title:title.trim(),author:author.trim()};
   }
 

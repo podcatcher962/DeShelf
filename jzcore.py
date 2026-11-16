@@ -46,10 +46,74 @@ def decode(data, enc):
 
 # ---------------------------------------------------------------- 元信息
 
-_TITLE_IN_TEXT = re.compile(r"^\s*(?:书名|标题|题目|小说名)\s*[:：]\s*(.+?)\s*$")
-_AUTHOR_IN_TEXT = re.compile(r"^\s*(?:作者|作\s*者)\s*[:：]\s*(.+?)\s*$")
+# 正文里的字段标识。标识可以在行首，也可以跟在同一行前一个字段后面（用空白或分隔符隔开），
+# 但前面必须是空白/分隔符，免得把「这本书的作者：某某」这类叙述句当成元信息。
+_TITLE_LABELS = r"(?:书名|标题|题\s*目|小说名)"
+_AUTHOR_LABELS = r"(?:作者|作\s*者)"
+_FIELD_LABELS = r"(?:%s|%s)" % (_TITLE_LABELS, _AUTHOR_LABELS)
+_LABEL_HEAD = r"(?:^|(?<=[\s\u3000,，;；、|｜/／]))"
+_TITLE_IN_TEXT = re.compile(_LABEL_HEAD + _TITLE_LABELS + r"\s*[:：]\s*")
+_AUTHOR_IN_TEXT = re.compile(_LABEL_HEAD + _AUTHOR_LABELS + r"\s*[:：]\s*")
+# 同一行挤着多个字段时，值到此为止
+_FIELD_END = re.compile(r"\s*%s\s*[:：]" % _FIELD_LABELS)
 _BRACKET = re.compile(r"《(.+?)》")
 _JUNK = re.compile(r"[（(].*?[]）)]|\[[^\]]*\]|\.txt$|\.TXT$", re.I)
+
+# 文件名里常见的作者标识，可用 guess_meta_detail(author_keys=...) 替换
+AUTHOR_KEYS = ("作者", "著者", "编者", "编著", "著")
+# 零宽/BOM/方向控制符，常混在下载来的文件名里
+_INVIS = re.compile("[\ufeff\u200b-\u200f\u2028\u2029\u2060]")
+# 方括号里的名字：[作者]书名、书名[作者]；圆括号多是版本信息，不算
+_BRACKET_AUTHOR = re.compile(r"[\[【]([^\[\]【】]{1,20})[\]】]")
+# 版本 / 来源类标签，出现在方括号或标识后面时不是作者
+_META_TAGS = {
+    "全本", "全集", "全书", "完本", "完结", "完结本", "连载", "精校", "精校版",
+    "校对", "校对版", "修订版", "珍藏版", "收藏版", "无删减", "未删节", "手打",
+    "手打版", "全文", "全文字", "txt", "text", "下载", "免费", "最新章节",
+}
+# 占位词：出现了也不算识别出作者
+_AUTHOR_BAD = {
+    "未知", "佚名", "无名", "不详", "暂无", "无", "作者", "n/a", "na",
+    "unknown", "null", "none",
+}
+
+
+def _author_keys_re(keys=None):
+    """把标识元组编成正则分支，长标识在前（编著 先于 著）。"""
+    return "|".join(re.escape(k) for k in sorted(keys or AUTHOR_KEYS, key=len, reverse=True))
+
+
+def _author_re(keys=None):
+    """「作者标识 + 作者名」的匹配式。
+
+    标识后面必须跟冒号或者空白，否则「著作权法」「名著合集」会被误当成作者行；
+    名字里碰到下一个「作者：」就停，免得「作者：甲作者：乙」拼成「甲作者」。
+    """
+    body = _author_keys_re(keys)
+    return re.compile(
+        r"(?:%s)\s*(?:[:：]\s*|\s+)"
+        r"((?:(?!(?:%s)\s*[:：])[^\s\[\]【】()（）《》_\-—－:：,，。;；、])+)" % (body, body))
+
+
+def _cut_field(s):
+    """把字段值截到下一个「书名：」「作者：」等标识之前，并去掉残留分隔符。"""
+    m = _FIELD_END.search(s)
+    if m:
+        s = s[:m.start()]
+    return s.strip(" \t\u3000,，;；|｜/／、")
+
+
+def _clean_author(s):
+    """清洗作者串，去掉扩展名残留、书名号、多余空格与不可见字符。"""
+    s = _INVIS.sub("", s or "")
+    s = re.sub(r"(?:\.(?:txt|text))+$", "", s.strip(), flags=re.I)
+    s = s.strip(" \t\u3000-—－_·.,，。;；:：、<>《》|｜/／\"'“”‘’")
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s or len(s) > 20 or s.isdigit():
+        return ""
+    if s.lower() in _AUTHOR_BAD or s in _META_TAGS:
+        return ""
+    return s
 
 
 def _clean_name(name):
@@ -58,38 +122,79 @@ def _clean_name(name):
     return re.sub(r"\s+", " ", name).strip()
 
 
-def guess_meta(filename, text):
-    """从文件名与正文开头推断 (书名, 作者)。"""
-    base = os.path.splitext(os.path.basename(filename))[0]
-    title, author = "", ""
+def guess_meta_detail(filename, text, author_keys=None):
+    """推断书名与作者，并给出各自的来源，无法识别时明确标为 "none"。
 
-    head = "\n".join(text.splitlines()[:25])
-    for line in head.splitlines():
-        m = _TITLE_IN_TEXT.match(line)
-        if m and not title:
-            title = m.group(1).strip()
-        m = _AUTHOR_IN_TEXT.match(line)
-        if m and not author:
-            author = m.group(1).strip()
+    author_keys 可替换文件名里的作者标识（默认 AUTHOR_KEYS）。
+    返回 {"title", "author", "title_from", "author_from"}，
+    来源取 "text"（正文明写）/ "filename"（文件名）/ "none"（没识别出来）。
+    """
+    title, author = "", ""
+    title_from = author_from = "none"
+
+    # 1) 正文优先：前 25 行里的「书名：」「作者：」，同一行有多个字段也能分别取到
+    for line in (text or "").splitlines()[:25]:
+        if not title:
+            m = _TITLE_IN_TEXT.search(line)
+            if m:
+                cand = _cut_field(line[m.end():])
+                if cand:
+                    title, title_from = cand, "text"
+        if not author:
+            m = _AUTHOR_IN_TEXT.search(line)
+            if m:
+                cand = _clean_author(_cut_field(line[m.end():]))
+                if cand:
+                    author, author_from = cand, "text"
+
+    # 2) 文件名：去掉 BOM/隐藏字符与所有 .txt 尾巴，只留主名
+    base = _INVIS.sub("", os.path.basename(filename or ""))
+    base = re.sub(r"(?:\.(?:txt|text))+$", "", base, flags=re.I)
 
     m = _BRACKET.search(base)
     if m and not title:
-        title = m.group(1).strip()
+        cand = m.group(1).strip()
+        if cand:
+            title, title_from = cand, "filename"
 
+    # 3) 文件名：方括号里的名字（[作者]书名 / 书名[作者]）
     rest = _BRACKET.sub("", base)
+    for m in _BRACKET_AUTHOR.finditer(rest):
+        cand = _clean_author(m.group(1))
+        if cand:
+            if not author:
+                author, author_from = cand, "filename"
+            rest = rest.replace(m.group(0), " ")
+            break
+
+    # 4) 文件名：「作者：xxx」等标识，只认第一个；正文已有作者时也照样剔出书名
+    m = _author_re(author_keys).search(rest)
+    if m:
+        if not author:
+            cand = _clean_author(m.group(1))
+            if cand:
+                author, author_from = cand, "filename"
+        rest = rest.replace(m.group(0), " ")
+
     rest = _clean_name(rest)
     if rest:
         parts = [p for p in rest.split(" ") if p]
-        if not title:
-            title = parts[0]
+        if not title and parts:
+            title, title_from = parts[0], "filename"
         if not author and len(parts) >= 2:
-            cand = parts[-1]
-            if 1 < len(cand) <= 12 and not cand.isdigit():
-                author = cand
+            cand = _clean_author(parts[-1])
+            if cand and 1 < len(cand) <= 12:
+                author, author_from = cand, "filename"
 
-    if not title:
-        title = _clean_name(base) or base
-    return title.strip(), author.strip()
+    return {"title": title.strip(), "author": author,
+            "title_from": title_from, "author_from": author_from}
+
+
+def guess_meta(filename, text):
+    """从文件名与正文开头推断 (书名, 作者)，书名兜底为文件名本身。"""
+    d = guess_meta_detail(filename, text)
+    title = d["title"] or _clean_name(os.path.splitext(os.path.basename(filename or ""))[0])
+    return (title.strip() or os.path.basename(filename or "")), d["author"]
 
 
 def count_chars(text):
