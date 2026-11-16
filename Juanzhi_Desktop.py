@@ -15,6 +15,11 @@ from collections import Counter
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
+try:
+    import ctypes
+except ImportError:              # 非 Windows / 精简解释器：全部 DPI 调用自动降级
+    ctypes = None
+
 import jzcore
 
 APP_CN = jzcore.APP_CN
@@ -390,23 +395,113 @@ def safe_name(s, maxlen=60, fallback="未命名"):
     return (s or fallback)[:maxlen]
 
 
-def _dpi(root):
+# ============================================================ DPI / 屏幕几何
+_SCALE = 1.0        # 96 DPI 逻辑像素 → 当前 DPI 物理像素的倍率（125% = 1.25）
+
+
+def px(v):
+    """96 DPI 下的逻辑像素 → 当前 DPI 下的物理像素。
+
+    界面里所有写死的像素尺寸（窗口大小、行高、列宽、内边距、画布坐标）
+    都必须经过这里换算，否则开启系统缩放后只有字号变大、布局不变。
+    """
+    return int(round(v * _SCALE))
+
+
+def _set_dpi_aware():
+    """声明进程 DPI 感知。**必须**在 tk.Tk() 之前调用。
+
+    Tk 只在初始化时按当时的屏幕 DPI 计算一次 tk scaling 并缓存；
+    若像旧代码那样在 Tk() 之后才 SetProcessDpiAwareness(1)，进程此时已
+    变为 DPI 感知（窗口不再被系统位图放大），而 Tk 仍按 96 DPI 出图，
+    于是 125%/150% 下文字与控件全部偏小。
+
+    这里选 System DPI Aware 而非 Per-Monitor：Tk 8.6 不处理
+    WM_DPICHANGED，声明 Per-Monitor 后把窗口拖到另一块不同 DPI 的屏幕
+    会停留在旧的缩放倍率上，反而更糟。
+    """
+    if ctypes is None or os.name != "nt":
+        return
     try:
-        from ctypes import windll
-        windll.shcore.SetProcessDpiAwareness(1)
+        if ctypes.windll.shcore.SetProcessDpiAwareness(1) == 0:   # S_OK
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
 
 
-def _center_win(win, w, h):
-    """把窗口放到主屏居中偏上，开屏与主窗同位置切换不会跳动。"""
+def _init_metrics(root):
+    """读取真实 DPI，校准点字号（tk scaling）与像素尺寸（px）的倍率。
+
+    点字号由 tk scaling 缩放、像素尺寸由 px() 缩放，两者用同一个 DPI
+    基准，所以字体与控件保持设计稿的相对比例，不会互相挤压。
+    """
+    global _SCALE
     try:
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        dpi = float(root.winfo_fpixels("1i"))
     except Exception:
-        return
-    x = max(0, (sw - w) // 2)
-    y = max(0, (sh - h) // 2 - 12)
-    win.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        dpi = 0.0
+    if not (60.0 <= dpi <= 480.0):        # 取值异常时退回 96 DPI
+        dpi = 96.0
+    # 只放大不缩小：84 DPI 之类的老屏 / 非 Windows 平台保持设计尺寸，
+    # 免得为了「适配」反而把界面整体压小。
+    _SCALE = max(1.0, dpi / 96.0)
+    try:
+        root.tk.call("tk", "scaling", dpi / 72.0)   # 1 point = dpi/72 px
+    except Exception:
+        pass
+    return _SCALE
+
+
+def _work_area():
+    """主显示器工作区（物理像素，已剔除任务栏）；失败返回 None。"""
+    if ctypes is None or os.name != "nt":
+        return None
+    try:
+        class _RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                        ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+        r = _RECT()
+        # SPI_GETWORKAREA = 0x0030
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(r), 0):
+            if r.right > r.left and r.bottom > r.top:
+                return r.right - r.left, r.bottom - r.top, r.left, r.top
+    except Exception:
+        pass
+    return None
+
+
+def _center_win(win, w, h):
+    """把窗口严格居中到主显示器工作区（水平 + 垂直）。
+
+    w/h 以 96 DPI 逻辑像素传入，内部按 DPR 换算并按工作区夹取：
+    · 不再有硬编码的 -12 偏移，所以是真正的几何居中；
+    · 用工作区而不是整屏，任务栏不会把视觉中心顶高；
+    · 开屏与主窗走同一函数，两者中心重合、切换时不会跳动。
+    """
+    try:
+        win.update_idletasks()
+    except Exception:
+        pass
+    W, H = px(w), px(h)
+    area = _work_area()
+    if area:
+        aw, ah, ax, ay = area
+    else:
+        try:
+            aw, ah, ax, ay = win.winfo_screenwidth(), win.winfo_screenheight(), 0, 0
+        except Exception:
+            return None
+    W = max(1, min(W, aw - px(24)))       # 小屏 + 高缩放时别超出可见区域
+    H = max(1, min(H, ah - px(24)))
+    x = ax + (aw - W) // 2
+    y = ay + (ah - H) // 2
+    win.geometry("%dx%d+%d+%d" % (W, H, x, y))
+    return W, H
 
 
 class App:
@@ -433,8 +528,8 @@ class App:
         self.prog_var = tk.DoubleVar(value=0)
 
         root.title(self.S["w_title"] % (APP_CN, APP_EN, APP_VER))
-        root.geometry("1080x720")
-        root.minsize(900, 620)
+        root.geometry("%dx%d" % (px(1080), px(720)))
+        root.minsize(px(900), px(620))
         root.configure(bg=BG)
         self._style()
         self._menu()
@@ -465,7 +560,7 @@ class App:
         st.configure("TCheckbutton", background=BG)
         st.configure("TRadiobutton", background=BG)
         st.configure("TNotebook", background=BG)
-        st.configure("Treeview", rowheight=23)
+        st.configure("Treeview", rowheight=px(23))
         st.configure("Accent.TButton", background="#4A7EBB", foreground="white")
         st.configure("Go.TButton", background="#2E7D32", foreground="white")
 
@@ -506,17 +601,17 @@ class App:
 
     def _top(self, root):
         S = self.S
-        f = ttk.Frame(root, padding=(8, 6))
+        f = ttk.Frame(root, padding=(px(8), px(6)))
         f.pack(fill="x")
         ttk.Label(f, text=S["lib_dir"]).pack(side="left")
         e = ttk.Entry(f, textvariable=self.dir_var)
-        e.pack(side="left", fill="x", expand=True, padx=4)
+        e.pack(side="left", fill="x", expand=True, padx=px(4))
         e.bind("<Return>", lambda _e: self.do_scan())
         ttk.Button(f, text=S["browse"], command=self.pick_dir).pack(side="left")
         ttk.Button(f, text=S["scan"], style="Accent.TButton",
-                   command=self.do_scan).pack(side="left", padx=(4, 0))
+                   command=self.do_scan).pack(side="left", padx=(px(4), 0))
         ttk.Button(f, text=S["m_rescan_fresh"],
-                   command=lambda: self.do_scan(fresh=True)).pack(side="left", padx=4)
+                   command=lambda: self.do_scan(fresh=True)).pack(side="left", padx=px(4))
         self.btn_stop = ttk.Button(f, text=S["stop"], command=self.do_stop, state="disabled")
         self.btn_stop.pack(side="left")
 
@@ -524,7 +619,7 @@ class App:
         S = self.S
         nb = ttk.Notebook(root)
         self.nb = nb
-        nb.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        nb.pack(fill="both", expand=True, padx=px(8), pady=(0, px(4)))
         self.tab_lib = ttk.Frame(nb)
         self.tab_clean = ttk.Frame(nb)
         self.tab_chap = ttk.Frame(nb)
@@ -543,12 +638,12 @@ class App:
         S = self.S
         f = self.tab_lib
         bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(6, 4))
+        bar.pack(fill="x", pady=(px(6), px(4)))
         for txt, cmd in ((S["m_sel_all"], lambda: self.set_all(True)),
                          (S["m_sel_none"], lambda: self.set_all(False)),
                          (S["m_invert"], self.invert_sel),
                          (S["m_sel_dup"], self.sel_dup)):
-            ttk.Button(bar, text=txt, command=cmd).pack(side="left", padx=2)
+            ttk.Button(bar, text=txt, command=cmd).pack(side="left", padx=px(2))
         ttk.Label(bar, text=S["lib_hint"], foreground="#666666").pack(side="left")
         self.info_var = tk.StringVar(value=S["lib_info"].format(0, 0))
         ttk.Label(bar, textvariable=self.info_var).pack(side="right")
@@ -560,8 +655,8 @@ class App:
         heads = {"sel": "✓", "title": S["col_title"], "author": S["col_author"],
                  "chars": S["col_chars"], "enc": S["col_enc"], "chap": S["col_chap"],
                  "size": S["col_size"], "rel": S["col_rel"]}
-        widths = {"sel": 32, "title": 190, "author": 100, "chars": 80, "enc": 76,
-                  "chap": 56, "size": 78, "rel": 320}
+        widths = {"sel": px(32), "title": px(190), "author": px(100), "chars": px(80),
+                  "enc": px(76), "chap": px(56), "size": px(78), "rel": px(320)}
         for c in cols:
             self.tv.heading(c, text=heads[c])
             self.tv.column(c, width=widths[c], anchor="w" if c in ("title", "author", "rel") else "center")
@@ -576,42 +671,42 @@ class App:
     def _build_clean(self):
         S = self.S
         f = self.tab_clean
-        left = ttk.LabelFrame(f, text=S["grp_rules"], width=280)
-        left.pack(side="left", fill="y", padx=(6, 4), pady=6)
+        left = ttk.LabelFrame(f, text=S["grp_rules"], width=px(280))
+        left.pack(side="left", fill="y", padx=(px(6), px(4)), pady=px(6))
         left.pack_propagate(False)
         en = self.lang == EN
         for r in jzcore.RULES:
             name = r["name_en"] if en else r["name"]
             tip = r["tip_en"] if en else r["tip"]
             cb = ttk.Checkbutton(left, text=name, variable=self.rule_vars[r["id"]])
-            cb.pack(anchor="w", padx=8, pady=2)
+            cb.pack(anchor="w", padx=px(8), pady=px(2))
             ttk.Label(left, text="    " + tip, foreground="#777777",
-                      font=FONT_S, wraplength=250).pack(anchor="w", padx=8)
+                      font=FONT_S, wraplength=px(250)).pack(anchor="w", padx=px(8))
         bf = ttk.Frame(left)
-        bf.pack(anchor="w", padx=8, pady=8)
+        bf.pack(anchor="w", padx=px(8), pady=px(8))
         ttk.Button(bf, text=S["b_all_rules"], command=lambda: self.set_rules(True)).pack(side="left")
-        ttk.Button(bf, text=S["b_def_rules"], command=lambda: self.set_rules(None)).pack(side="left", padx=4)
+        ttk.Button(bf, text=S["b_def_rules"], command=lambda: self.set_rules(None)).pack(side="left", padx=px(4))
 
         right = ttk.Frame(f)
-        right.pack(side="left", fill="both", expand=True, padx=4, pady=6)
+        right.pack(side="left", fill="both", expand=True, padx=px(4), pady=px(6))
         bar = ttk.Frame(right)
         bar.pack(fill="x")
         ttk.Button(bar, text=S["b_preview"], style="Accent.TButton",
                    command=self.preview_clean).pack(side="left")
         self.btn_clean_apply = ttk.Button(bar, text=S["b_clean_apply"],
                                           command=self.start_clean)
-        self.btn_clean_apply.pack(side="left", padx=(6, 0))
+        self.btn_clean_apply.pack(side="left", padx=(px(6), 0))
         ttk.Label(bar, text=S["clean_hint"], foreground="#666666").pack(side="left")
         self.cmp_var = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.cmp_var, foreground="#2E7D32").pack(side="right")
         box = ttk.Frame(right)
-        box.pack(fill="both", expand=True, pady=4)
+        box.pack(fill="both", expand=True, pady=px(4))
         self.txt_before = self._mk_text(box, S["col_pre"])
         self.txt_after = self._mk_text(box, S["col_post"])
 
     def _mk_text(self, parent, title):
         f = ttk.LabelFrame(parent, text=title)
-        f.pack(side="left", fill="both", expand=True, padx=2)
+        f.pack(side="left", fill="both", expand=True, padx=px(2))
         # width 必须给小值：pack 按顺序满足请求宽度，80 字符会吃满空间导致两栏不等分
         t = tk.Text(f, wrap="none", font=MONO, width=30, height=10, bg="#FFFFFF",
                     relief="solid", borderwidth=1)
@@ -625,30 +720,31 @@ class App:
         S = self.S
         f = self.tab_chap
         top = ttk.Frame(f)
-        top.pack(fill="x", padx=8, pady=(8, 4))
+        top.pack(fill="x", padx=px(8), pady=(px(8), px(4)))
         ttk.Label(top, text=S["re_label"]).pack(side="left")
         e = ttk.Entry(top, textvariable=self.custom_re)
-        e.pack(side="left", fill="x", expand=True, padx=4)
+        e.pack(side="left", fill="x", expand=True, padx=px(4))
         ttk.Button(top, text=S["b_try"], style="Accent.TButton",
                    command=self.preview_chap).pack(side="left")
         ttk.Button(top, text=S["b_try_all"],
-                   command=self.preview_chap_all).pack(side="left", padx=(6, 0))
+                   command=self.preview_chap_all).pack(side="left", padx=(px(6), 0))
         pick = ttk.Frame(f)
-        pick.pack(fill="x", padx=8, pady=(2, 0))
+        pick.pack(fill="x", padx=px(8), pady=(px(2), 0))
         ttk.Label(pick, text=S["lab_chap_pick"]).pack(side="left")
         self.chap_pick_text = tk.StringVar()
         self.cb_chap = ttk.Combobox(pick, textvariable=self.chap_pick_text,
                                     state="readonly", width=46)
-        self.cb_chap.pack(side="left", padx=4)
+        self.cb_chap.pack(side="left", padx=px(4))
         ttk.Label(pick, text=S["chap_pick_hint"], foreground="#666666",
                   font=FONT_S).pack(side="left")
         ttk.Label(f, text=S["chap_hint"],
-                  foreground="#666666", font=FONT_S).pack(anchor="w", padx=8)
+                  foreground="#666666", font=FONT_S).pack(anchor="w", padx=px(8))
         wrap = ttk.Frame(f)
-        wrap.pack(fill="both", expand=True, padx=8, pady=4)
+        wrap.pack(fill="both", expand=True, padx=px(8), pady=px(4))
         self.tv_chap = ttk.Treeview(wrap, columns=("no", "title", "chars"),
                                     show="headings", height=8)
-        for c, w, t in (("no", 60, "#"), ("title", 520, S["col_chap_title"]), ("chars", 100, S["col_chars"])):
+        for c, w, t in (("no", px(60), "#"), ("title", px(520), S["col_chap_title"]),
+                        ("chars", px(100), S["col_chars"])):
             self.tv_chap.heading(c, text=t)
             self.tv_chap.column(c, width=w, anchor="w" if c == "title" else "center")
         sb = ttk.Scrollbar(wrap, orient="vertical", command=self.tv_chap.yview)
@@ -656,48 +752,48 @@ class App:
         sb.pack(side="right", fill="y")
         self.tv_chap.pack(side="left", fill="both", expand=True)
         self.chap_var = tk.StringVar(value=S["chap_res"])
-        ttk.Label(f, textvariable=self.chap_var).pack(anchor="w", padx=8, pady=(0, 6))
+        ttk.Label(f, textvariable=self.chap_var).pack(anchor="w", padx=px(8), pady=(0, px(6)))
 
     def _build_out(self):
         S = self.S
         f = self.tab_out
         g1 = ttk.LabelFrame(f, text=S["grp_where"])
-        g1.pack(fill="x", padx=8, pady=(10, 6))
+        g1.pack(fill="x", padx=px(8), pady=(px(10), px(6)))
         for v, t in (("new", S["r_new"]), ("inplace", S["r_inplace"]), ("none", S["r_none"])):
             ttk.Radiobutton(g1, text=t, value=v, variable=self.mode_var,
-                            command=self.sync_out).pack(anchor="w", padx=10, pady=2)
+                            command=self.sync_out).pack(anchor="w", padx=px(10), pady=px(2))
 
         g2 = ttk.LabelFrame(f, text=S["grp_fmt"])
-        g2.pack(fill="x", padx=8, pady=6)
+        g2.pack(fill="x", padx=px(8), pady=px(6))
         row = ttk.Frame(g2)
-        row.pack(fill="x", padx=10, pady=4)
+        row.pack(fill="x", padx=px(10), pady=px(4))
         ttk.Checkbutton(row, text=S["f_epub"],
-                        variable=self.fmt_vars["epub"]).pack(side="left", padx=(0, 16))
+                        variable=self.fmt_vars["epub"]).pack(side="left", padx=(0, px(16)))
         ttk.Checkbutton(row, text=S["f_merge"],
-                        variable=self.fmt_vars["merge"]).pack(side="left", padx=(0, 16))
+                        variable=self.fmt_vars["merge"]).pack(side="left", padx=(0, px(16)))
         ttk.Checkbutton(row, text=S["f_split"],
                         variable=self.fmt_vars["split"]).pack(side="left")
 
         g3 = ttk.LabelFrame(f, text=S["grp_out"])
-        g3.pack(fill="x", padx=8, pady=6)
+        g3.pack(fill="x", padx=px(8), pady=px(6))
         r = ttk.Frame(g3)
-        r.pack(fill="x", padx=10, pady=6)
-        ttk.Entry(r, textvariable=self.out_var).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        r.pack(fill="x", padx=px(10), pady=px(6))
+        ttk.Entry(r, textvariable=self.out_var).pack(side="left", fill="x", expand=True, padx=(0, px(4)))
         ttk.Button(r, text=S["browse"], command=self.pick_out).pack(side="left")
 
         bar = ttk.Frame(f)
-        bar.pack(fill="x", padx=8, pady=10)
+        bar.pack(fill="x", padx=px(8), pady=px(10))
         self.btn_go = ttk.Button(bar, text=S["b_go"], style="Go.TButton", command=self.start_run)
         self.btn_go.pack(side="left")
         self.pb = ttk.Progressbar(bar, variable=self.prog_var, maximum=100)
-        self.pb.pack(side="left", fill="x", expand=True, padx=10)
+        self.pb.pack(side="left", fill="x", expand=True, padx=px(10))
         ttk.Label(f, text=S["out_note"],
-                  foreground="#777777", font=FONT_S).pack(anchor="w", padx=8)
+                  foreground="#777777", font=FONT_S).pack(anchor="w", padx=px(8))
 
     def _log(self, root):
         S = self.S
-        f = ttk.LabelFrame(root, text=S["grp_log"], height=130)
-        f.pack(fill="x", padx=8, pady=(0, 4))
+        f = ttk.LabelFrame(root, text=S["grp_log"], height=px(130))
+        f.pack(fill="x", padx=px(8), pady=(0, px(4)))
         f.pack_propagate(False)
         self.logbox = tk.Text(f, height=7, font=FONT_S, bg="#FFFFFF",
                               relief="solid", borderwidth=1)
@@ -708,7 +804,8 @@ class App:
 
     def _status(self, root):
         ttk.Label(root, textvariable=self.status_var, anchor="w",
-                  relief="sunken", padding=(6, 2)).pack(fill="x", padx=8, pady=(0, 6))
+                  relief="sunken",
+                  padding=(px(6), px(2))).pack(fill="x", padx=px(8), pady=(0, px(6)))
 
     # ------------------------------------------------------------ 基础操作
     def log(self, msg):
@@ -813,12 +910,12 @@ class App:
         S = self.S
         w = tk.Toplevel(self.root)
         w.title(title)
-        w.geometry("640x520")
-        t = tk.Text(w, wrap="word", font=FONT, padx=10, pady=10)
+        _center_win(w, 640, 520)          # 说明窗同样按 DPR 缩放并居中
+        t = tk.Text(w, wrap="word", font=FONT, padx=px(10), pady=px(10))
         t.insert("1.0", body)
         t.configure(state="disabled")
         t.pack(fill="both", expand=True)
-        ttk.Button(w, text=S["d_close"], command=w.destroy).pack(pady=6)
+        ttk.Button(w, text=S["d_close"], command=w.destroy).pack(pady=px(6))
 
     def show_about(self):
         S = self.S
@@ -1208,8 +1305,8 @@ class App:
         self.tv_chap.heading("no", text="#")
         self.tv_chap.heading("title", text=S["col_c_book"] if batch else S["col_chap_title"])
         self.tv_chap.heading("chars", text=S["col_c_chaps"] if batch else S["col_chars"])
-        self.tv_chap.column("title", width=320 if batch else 520)
-        self.tv_chap.column("chars", width=140 if batch else 100)
+        self.tv_chap.column("title", width=px(320) if batch else px(520))
+        self.tv_chap.column("chars", width=px(140) if batch else px(100))
         self._chap_batch = batch
 
     def preview_chap_all(self):
@@ -1380,11 +1477,13 @@ class _Splash:
         win.overrideredirect(True)
         win.attributes("-topmost", True)
         win.configure(bg=SPLASH_BG)
-        _center_win(win, SPLASH_W, SPLASH_H)
-        c = tk.Canvas(win, width=SPLASH_W, height=SPLASH_H, bg=SPLASH_BG,
-                      highlightthickness=0, bd=0)
-        c.pack()
+        # 画布随窗口尺寸自适应：_paint 按画布实际尺寸等比缩放并居中绘制
+        c = self.cv = tk.Canvas(win, width=px(SPLASH_W), height=px(SPLASH_H),
+                                bg=SPLASH_BG, highlightthickness=0, bd=0)
+        c.pack(fill="both", expand=True)
         self._paint(c)
+        c.bind("<Configure>", lambda _e: self._paint(c))
+        _center_win(win, SPLASH_W, SPLASH_H)      # 严格水平 + 垂直居中
         try:
             win.attributes("-alpha", 0.0)
         except tk.TclError:
@@ -1395,37 +1494,60 @@ class _Splash:
         win.bind("<Key>", self._skip)
         win.focus_force()
         win.update_idletasks()
+        self._paint(c)                            # 映射后按真实像素再绘一次
 
     def _paint(self, c):
+        """在 560x340 的设计坐标系里绘制，再按画布实际尺寸等比缩放并居中。
+
+        所有坐标经 X()/Y() 平移缩放，文字用负字号（像素）跟随 k，
+        因此窗口尺寸或 DPR 如何变化，海报内容始终水平垂直居中且不拉伸。
+        """
         S = self.S
-        W, H = SPLASH_W, SPLASH_H
-        cx = W // 2
+        c.delete("all")
+        W, H = c.winfo_width(), c.winfo_height()
+        if W < 2 or H < 2:                        # 尚未映射：先用设计尺寸
+            W, H = px(SPLASH_W), px(SPLASH_H)
+        k = min(W / float(SPLASH_W), H / float(SPLASH_H))   # 等比，不拉伸版式
+        ox = (W - SPLASH_W * k) / 2.0             # 水平居中偏移
+        oy = (H - SPLASH_H * k) / 2.0             # 垂直居中偏移
+
+        def X(x):
+            return ox + x * k
+
+        def Y(y):
+            return oy + y * k
+
+        def P(v):                                 # 线宽 / 字号（像素）
+            return max(1, int(round(v * k)))
+
         g, ln = SPLASH_GOLD, SPLASH_LINE
+        cx = X(SPLASH_W / 2.0)
         # 细金外框
-        c.create_rectangle(11, 11, W - 11, H - 11, outline=g, width=2)
+        c.create_rectangle(X(11), Y(11), X(SPLASH_W - 11), Y(SPLASH_H - 11),
+                           outline=g, width=P(2))
         # 四角回形小装饰（沿框延伸的短金线）
         L = 22
-        c.create_line(11, 11, 11 + L, 11, fill=g, width=3)
-        c.create_line(11, 11, 11, 11 + L, fill=g, width=3)
-        c.create_line(W - 11, 11, W - 11 - L, 11, fill=g, width=3)
-        c.create_line(W - 11, 11, W - 11, 11 + L, fill=g, width=3)
-        c.create_line(11, H - 11, 11 + L, H - 11, fill=g, width=3)
-        c.create_line(11, H - 11, 11, H - 11 - L, fill=g, width=3)
-        c.create_line(W - 11, H - 11, W - 11 - L, H - 11, fill=g, width=3)
-        c.create_line(W - 11, H - 11, W - 11, H - 11 - L, fill=g, width=3)
-        # 主标题「卷帙」：楷体大字
-        c.create_text(cx, 88, text=APP_CN, font=("KaiTi", 58),
+        for x0, y0, dx, dy in ((11, 11, 1, 0), (11, 11, 0, 1),
+                               (SPLASH_W - 11, 11, -1, 0), (SPLASH_W - 11, 11, 0, 1),
+                               (11, SPLASH_H - 11, 1, 0), (11, SPLASH_H - 11, 0, -1),
+                               (SPLASH_W - 11, SPLASH_H - 11, -1, 0),
+                               (SPLASH_W - 11, SPLASH_H - 11, 0, -1)):
+            c.create_line(X(x0), Y(y0), X(x0 + dx * L), Y(y0 + dy * L),
+                          fill=g, width=P(3))
+        # 主标题「卷帙」：楷体大字（负字号 = 像素，避免被 tk scaling 二次放大）
+        c.create_text(cx, Y(88), text=APP_CN, font=("KaiTi", -P(77)),
                       fill=SPLASH_INK, anchor="n")
         # 英文名（字母间隔拉宽，模拟字距）
-        c.create_text(cx, 172, text=" ".join(APP_EN), font=(FONT[0], 13),
+        c.create_text(cx, Y(172), text=" ".join(APP_EN), font=(FONT[0], -P(17)),
                       fill=SPLASH_GOLD, anchor="n")
         # 一句定位
-        c.create_text(cx, 212, text=S["sp_tag"],
-                      font=(FONT[0], 11), fill=SPLASH_GRAY, anchor="n")
+        c.create_text(cx, Y(212), text=S["sp_tag"],
+                      font=(FONT[0], -P(15)), fill=SPLASH_GRAY, anchor="n")
         # 分隔线 + 底部信息
-        c.create_line(cx - 90, 250, cx + 90, 250, fill=ln, width=1)
-        c.create_text(cx, 272, text=S["sp_bottom"].format(APP_VER),
-                      font=(FONT[0], 9), fill=SPLASH_DIM, anchor="n")
+        c.create_line(X(SPLASH_W / 2.0 - 90), Y(250),
+                      X(SPLASH_W / 2.0 + 90), Y(250), fill=ln, width=P(1))
+        c.create_text(cx, Y(272), text=S["sp_bottom"].format(APP_VER),
+                      font=(FONT[0], -P(12)), fill=SPLASH_DIM, anchor="n")
 
     # ------------------------------------------------------------ 动画
     def fade_in(self, done):
@@ -1515,12 +1637,13 @@ class _Splash:
 
 def _boot(root):
     app = App(root)
-    _center_win(root, 1080, 720)
+    _center_win(root, 1080, 720)      # 与开屏海报同一套居中对齐逻辑
 
 
 def main():
+    _set_dpi_aware()                 # 必须在 tk.Tk() 之前：Tk 只初始化一次缩放
     root = tk.Tk()
-    _dpi(root)
+    _init_metrics(root)              # 必须在任何控件/画布创建之前
     if os.environ.get("JUANZHI_NO_SPLASH"):     # 测试/调试逃生门
         _boot(root)
         root.mainloop()
