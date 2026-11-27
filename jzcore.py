@@ -14,7 +14,7 @@ import zipfile
 
 APP_CN = "卷帙"
 APP_EN = "DeShelf"
-APP_VER = "v1.5.8"
+APP_VER = "v1.5.9"
 INDEX_NAME = ".deshelf_index.json"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".deshelf_config.json")
 
@@ -1230,6 +1230,55 @@ def _merge_empty_title(cur, hit):
     return (cur or "") + " " + (hit or "")
 
 
+_CH_NUM_S = r"[0-9０-９零〇一二三四五六七八九十百千两]{1,15}"
+# 一行里出现两次章号：第1章 + 第1章:标题
+_CH_DUP = re.compile(
+    r"^\s*(第\s*(" + _CH_NUM_S + r")\s*([章节節回卷篇集部话話]))"
+    r"[\s、,，.．·:：\-—]{0,3}"
+    r"(第\s*(" + _CH_NUM_S + r")\s*([章节節回卷篇集部话話])[\s\S]*)$")
+_CN_D = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3,
+         "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _num_val(s):
+    s = (s or "").strip().translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    if s.isdigit():
+        return int(s)
+    if s in _CN_D:
+        return _CN_D[s]
+    if s == "十":
+        return 10
+    m = re.fullmatch(r"([一二两三四五六七八九])?十([一二三四五六七八九])?", s)
+    if m:
+        return ((_CN_D[m.group(1)] if m.group(1) else 1) * 10
+                + (_CN_D[m.group(2)] if m.group(2) else 0))
+    return None
+
+
+def _collapse_title(t):
+    """章名里同一号重复就只留后一个。
+
+    盗版站常把目录行写成「第1章 第1章:走向他的被窝」（章节号 + 带号的标题），
+    原样留到界面上就是用户说的「第几章重复」。这里做最后一层兜底：
+    两次章号相同、大类相同（都是「章」）、后一截还带内容，就取后一截。
+    号不同（卷+章）或大类不同（章+节）一律不动。
+    """
+    s = (t or "").strip()
+    for _ in range(4):
+        m = _CH_DUP.match(s)
+        if not m:
+            break
+        if m.group(3) != m.group(6):
+            break
+        x, y = _num_val(m.group(2)), _num_val(m.group(5))
+        if x is None or y is None or x != y:
+            break
+        rest = m.group(4).strip()
+        if len(rest) < 2:
+            break
+        s = rest
+    return s
+
 # 开头这几行算元信息：只由它们组成的「开篇」不单独成章
 _META_LINE = re.compile(r"^(?:书名|标题|题\s*目|小说名|作\s*者|著\s*者|简介|内容简介|内容介绍)\s*[:：]")
 
@@ -1299,6 +1348,9 @@ def split_chapters(text, custom=None):
                 if ln.strip() and not _META_LINE.match(ln.strip())]
         if not keep:
             chapters.pop(0)
+    # 章名里同一号重复（盗版站把「第1章」和「第1章:标题」并成一行）：
+    # 「第1章 第1章:走向他的被窝」→「第1章:走向他的被窝」
+    chapters = [(_collapse_title(t), b) for t, b in chapters]
     if not chapters:
         chapters = [("全文", text.strip())]
     return chapters

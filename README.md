@@ -2,6 +2,18 @@
 
 > 本地 TXT 整理工具 — 扫描 · 清洗 · 分章 · **导出 EPUB / TXT**
 >
+> **v1.5.9** · 上一版还漏了一种写法：**章节号和标题本来就挤在同一行**，而且标题里又带了一次章号，像
+> `第1章 第1章:走向他的被窝`。盗版站导出目录常这么排。上一版只处理「标题写两行」的情况，
+> 这种一行里自带两遍章号的，原样进了界面，读者看到的还是「第几章重复」。
+>
+> 这一版在分章收尾加了一道归并：章名里同一个号码、同一种单位（都是「章」）出现两遍，只留后面那截；
+> 号码不同（`第1卷 第1章`）、单位不同（`第1章 第1节`）一律不动，免得把真正的层级压平。
+> 桌面版和网页版用的是同一套判断。
+>
+> 验证：同一个函数在两端各跑 12 种写法（一行内重复的冒号写法、顿号写法、空格写法、全角冒号、
+> 中文数字与阿拉伯数字混写、卷+章、章+节、号码不同、正常章名、序章、只有章号没有标题），
+> 两端结果逐条一致；自带测试核心 8 组 0 失败、网页核心 56 项 0 失败。
+>
 > **v1.5.8** · 修「分章之后章名前头拖着一串第几章」——读者截图里看到的不是重复章节，是**一个章名里塞进了整页目录**。原因在分章逻辑：标题缓冲区还空着又遇到新标题时，代码直接把两行拼起来（本意是接「第三章 / 风起」这种分两行写的标题），**但没有判重**。txt 开头带一整页目录的书，就会拼成 `第1章 … 第25章 … 第1章`。
 >
 > 现在同一套规则用在桌面版和网页版：去掉空格后互相包含的，取更完整的那条；同一类（章/回/节）号码相同，取更完整的；号码不同，用新的（旧的没有正文，属于目录残留，直接丢掉）；卷后跟章、或者取不到号码，仍按原来的方式拼接，不冒险。
@@ -169,7 +181,7 @@ Mac 上用 Chrome / Edge 打开，可以授权整个文件夹、把结果写回�
 - 简体行 0 误删；
 - 22 000 行耗时 1.21 秒（单线程）。
 
-产物：`DeShelf-v1.5.8.exe` 14.86 MB（PyInstaller onefile），网页版单文件 0.16 MB，均不联网。
+产物：`DeShelf-v1.5.9.exe` 14.87 MB（PyInstaller onefile），网页版单文件 0.16 MB，均不联网。
 
 ### 免责声明
 
@@ -239,6 +251,12 @@ Mac 上用 Chrome / Edge 打开，可以授权整个文件夹、把结果写回�
 ## English
 
 > Local TXT organizing tool — scan · clean · split · **export EPUB / TXT**
+>
+> **v1.5.9** · The previous build still missed one layout: the **chapter number and the title on the same line**, with the number repeated inside the title — `第1章 第1章:走向他的被窝`. Pirate-site exports of a contents page are often written exactly like that. 1.5.8 only handled titles split across two lines, so this shape went to the interface untouched and still read as "the chapter number repeats".
+>
+> This build adds a final merge pass over chapter names: when the same number and the same unit (both 章) appear twice, keep the second half; a different number (`第1卷 第1章`) or a different unit (`第1章 第1节`) is left alone, so real hierarchy is not flattened. Same rule in the desktop and web builds.
+>
+> Verified by running the same function on both sides over 12 layouts (colon, ideographic comma, space, full-width colon, Chinese and Arabic numerals mixed, volume + chapter, chapter + section, mismatched numbers, a normal title, a prologue, a bare number with no title) — identical results on both sides; suites: 8 core groups and 56 web-core checks, 0 failures.
 >
 > **v1.5.8** · Fixes a chapter **title swallowing an entire table of contents**. What looked like duplicated chapter numbers was one title holding the whole TOC. When its title buffer was still empty and another title line arrived, the splitter concatenated the two — intended for titles written across two lines (`第三章` / `风起`), but with **no de-duplication**, so a book that opens with a page of contents produced `第1章 … 第25章 … 第1章`.
 >
@@ -406,7 +424,7 @@ and one traditional copy of each):
 - 0 simplified lines lost;
 - 22,000 lines processed in 1.21 s on a single thread.
 
-Artifacts: `DeShelf-v1.5.8.exe` 14.86 MB (PyInstaller onefile), web version 0.16 MB as a single file,
+Artifacts: `DeShelf-v1.5.9.exe` 14.87 MB (PyInstaller onefile), web version 0.16 MB as a single file,
 both fully offline.
 
 ### Disclaimer
