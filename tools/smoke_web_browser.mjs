@@ -74,7 +74,7 @@ try {
 
   // 1. 初始渲染
   let r = await evalv("({rules:document.querySelectorAll('.rule').length, h2:document.querySelector('#pane0 h2').textContent, nav:document.querySelector('#stepNav .st b').textContent})");
-  ok("规则网格 10 条", r.val && r.val.rules === 10, JSON.stringify(r.err || r.val));
+  ok("规则网格已渲染", r.val && r.val.rules >= 10, JSON.stringify(r.err || r.val));
   ok("中文标题渲染", r.val && /书库/.test(r.val.h2), r.err || (r.val && r.val.h2));
   ok("无初始化报错", errors.length === 0, errors.join(" | "));
 

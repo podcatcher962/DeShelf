@@ -14,7 +14,7 @@ import zipfile
 
 APP_CN = "卷帙"
 APP_EN = "DeShelf"
-APP_VER = "v1.5.7"
+APP_VER = "v1.5.8"
 INDEX_NAME = ".deshelf_index.json"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".deshelf_config.json")
 
@@ -1202,6 +1202,34 @@ CHAP_TPL = [
      r"|序章|序言|楔子|引子|尾声|尾聲|后记|後記|终章|終章|番外)"),
 ]
 
+# 章节号：第[数字/中文数字]章|节|回|卷|篇|集|部|话
+_CH_HEAD = re.compile(r"^\s*第\s*([0-9〇零一二三四五六七八九十百千两]+)\s*([章节節回卷篇集部话話])")
+
+
+def _merge_empty_title(cur, hit):
+    """缓冲区为空时又命中一个新标题，决定章名怎么写。
+
+    旧写法直接 cur + " " + hit，遇到目录连排或标题连写两行，章名会变成
+    「第一章 起 第二章 承 第三章 转 第一章 起」——用户看到的就是
+    「第几章第几章重复」（2026-11-27 小红书反馈）。
+    新规则：
+      同一大类（章/回/节…）号码相同 -> 取更完整的那一个，不拼接；
+      同一大类号码不同            -> 用新的，丢掉没正文的旧标题（目录残留）；
+      跨大类（卷后跟章）或取不到号 -> 仍按旧办法拼接，免得丢信息。
+    """
+    a = (cur or "").replace(" ", "")
+    h = (hit or "").replace(" ", "")
+    if a and h and (a in h or h in a):
+        return hit if len(h) > len(a) else cur
+    ma = _CH_HEAD.match(cur or "")
+    mb = _CH_HEAD.match(hit or "")
+    if ma and mb and ma.group(2) == mb.group(2):
+        if ma.group(1) == mb.group(1):
+            return hit if len(hit) > len(cur) else cur
+        return hit
+    return (cur or "") + " " + (hit or "")
+
+
 # 开头这几行算元信息：只由它们组成的「开篇」不单独成章
 _META_LINE = re.compile(r"^(?:书名|标题|题\s*目|小说名|作\s*者|著\s*者|简介|内容简介|内容介绍)\s*[:：]")
 
@@ -1252,8 +1280,8 @@ def split_chapters(text, custom=None):
                 chapters.append((cur_title, body))
                 cur_title = hit
             else:
-                # 连续标题或误判：合并标题，绝不丢弃已有的标题文字
-                cur_title = hit if cur_title == "开篇" else cur_title + " " + hit
+                # 连续标题或误判（目录连排、标题连写两行）：判重后再决定章名
+                cur_title = hit if cur_title == "开篇" else _merge_empty_title(cur_title, hit)
             buf = []
             # 同行正文归到这一章，缩进照原文留
             if tail:
@@ -1768,9 +1796,13 @@ def load_config():
         return {}
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except (ValueError, OSError):
         return {}
+    # 配置被写坏（断电、同步冲突、旧版本或别的程序占了这个文件名）时
+    # json.load 可能返回字符串/列表，后面 cfg.get 会直接抛异常、软件打不开。
+    # 这里只认字典，其余一律当没有配置。
+    return data if isinstance(data, dict) else {}
 
 
 def save_config(cfg):

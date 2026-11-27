@@ -159,7 +159,7 @@ b.dark{color:var(--ink)}
 
 <header>
   <div class="logo"><span class="cn">卷帙</span> <span class="en">DeShelf</span></div>
-  <span class="ver">v1.5.7</span>
+  <span class="ver">v1.5.8</span>
   <span class="spacer"></span>
   <button id="btnLang" title="Switch language / 切换语言">EN</button>
   <button id="btnHelp">帮助 Help</button>
@@ -541,7 +541,7 @@ const E = {
   runTitle:"Progress",
   log_found_all:"scan complete",
 };
-Z.aboutBody = '<p><b>卷帙 DeShelf · v1.5.7</b></p>'
+Z.aboutBody = '<p><b>卷帙 DeShelf · v1.5.8</b></p>'
  +'<p>本地 TXT 整理工具：<b>扫描 · 清洗 · 分章 · 导出 EPUB / TXT</b>。</p>'
  +'<p>清洗规则 12 条：网址、站点宣传、翻页残留、乱码、<b>标点单独占一行</b>（整行只有一个收尾引号、句号或逗号的，接回上一行；省略号/破折号独占一行不动，默认关闭）、<b>合并句中断行</b>（按手机屏宽硬断的文件，以空行为段落界接回去，默认关闭）、空行、首尾空白、全半角、缩进，以及<b>简繁重复行</b>——同一段正文同时有简体和繁体时，删掉繁体那一份（相邻成对、整章重复都能认；全繁体的书不动它）。简繁对照表取自 <b>OpenCC</b>（Apache-2.0 许可，仅用于比对，不改写正文）。</p>'
  +'<p>本页纯本地运行：不联网、不上传、不存储你的任何书籍内容。选中的文件只在你的浏览器里被处理，导出时由你亲自决定保存位置。</p>'
@@ -554,7 +554,7 @@ Z.aboutBody = '<p><b>卷帙 DeShelf · v1.5.7</b></p>'
  +'<p>本页以 <b>MIT License</b> 发布：可自由使用、复制、修改、再分发，也包括商业用途——不用付费、不用事先告知。唯一的硬性条件是<b>保留作者署名</b>：任何副本或实质性部分都必须保留「© 2026 永远的兰兰 (Lanlan Eternal)」与完整的 MIT 许可文本（仓库根目录的 LICENSE）。可以改代码、改软件名、闭源分发，但不能删掉署名，也不能改成自己的名字后声称原创。</p>'
  +'<p class="hint">第三方：OpenCC 简繁对照表（Apache License 2.0，仅用于比对，不改写正文）；封面与正文使用系统自带楷体，不分发任何字体文件。完整声明见仓库根目录的 THIRD-PARTY-NOTICES.md。</p>'
  +'<p style="color:var(--muted);font-size:12px">© 永远的兰兰 · Lanlan Eternal</p>';
-E.aboutBody = '<p><b>卷帙 DeShelf · v1.5.7</b></p>'
+E.aboutBody = '<p><b>卷帙 DeShelf · v1.5.8</b></p>'
  +'<p>A local TXT organizing tool: <b>scan · clean · split · export EPUB / TXT</b>.</p>'
  +'<p>Twelve cleaning rules: URLs, site promos, pagination leftovers, corrupted lines, <b>punctuation alone on a line</b> (a line holding only a closing quote, full stop or comma is pulled back; ellipsis/dash-only lines are never touched; off by default), <b>join mid-sentence line breaks</b> (for files hard-wrapped at phone width — blank lines are treated as paragraph breaks; off by default), blanks, trailing spaces, full/half width, indentation, and <b>duplicate simplified/traditional lines</b> &mdash; when the same passage appears in both scripts, the traditional copy is dropped (works whether the copies alternate or a whole chapter is duplicated; all-traditional books are left untouched). The script table comes from <b>OpenCC</b> (Apache-2.0, used for comparison only, never to rewrite text).</p>'
  +'<p>This page runs 100% locally: no network, no uploads, and it never stores your books. Files are processed only inside your browser, and you decide where exports are saved.</p>'
@@ -1299,6 +1299,22 @@ const Core = (() => {
   };
   /* 开头这几行算元信息：只由它们组成的「开篇」不单独成章 */
   const META_LINE=/^(?:书名|标题|题\s*目|小说名|作\s*者|著\s*者|简介|内容简介|内容介绍)\s*[:：]/;
+  const CH_HEAD=/^\s*第\s*([0-9〇零一二三四五六七八九十百千两]+)\s*([章节節回卷篇集部话話])/;
+  /* 缓冲区为空时又命中新标题：判重后再定章名。
+     旧写法 cur+" "+hit 遇到目录连排 / 标题连写两行，会拼成
+     「第一章 起 第二章 承 第三章 转 第一章 起」（2026-11-27 小红书反馈）。
+     同一大类同号码取更完整的；同大类不同号就用新的（目录残留丢掉）；
+     跨大类（卷后跟章）或取不到号，仍旧拼接。 */
+  function mergeEmptyTitle(cur,hit){
+    const a=String(cur||"").replace(/\s+/g,""), b=String(hit||"").replace(/\s+/g,"");
+    if(a&&b&&(a.indexOf(b)>=0||b.indexOf(a)>=0)) return b.length>a.length?hit:cur;
+    const ma=String(cur||"").match(CH_HEAD), mb=String(hit||"").match(CH_HEAD);
+    if(ma&&mb&&ma[2]===mb[2]){
+      if(ma[1]===mb[1]) return hit.length>cur.length?hit:cur;
+      return hit;
+    }
+    return String(cur||"")+" "+String(hit||"");
+  }
   function splitChapters(text,custom){
     let pats;
     if(custom&&String(custom).trim()){
@@ -1330,7 +1346,7 @@ const Core = (() => {
       if(hit!==null){
         const body=buf.join("\n").trim();
         if(body){chapters.push({t:cur,b:body});cur=hit;}
-        else cur=(cur==="开篇")?hit:cur+" "+hit;
+        else cur=(cur==="开篇")?hit:mergeEmptyTitle(cur,hit);
         buf.length=0;
         /* 同行正文归到这一章，缩进照原文留 */
         if(rest){const lead=(raw.match(/^\s*/)||[""])[0];buf.push(lead+rest);}

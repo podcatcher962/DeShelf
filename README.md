@@ -2,6 +2,16 @@
 
 > 本地 TXT 整理工具 — 扫描 · 清洗 · 分章 · **导出 EPUB / TXT**
 >
+> **v1.5.8** · 修「分章之后章名前头拖着一串第几章」——读者截图里看到的不是重复章节，是**一个章名里塞进了整页目录**。原因在分章逻辑：标题缓冲区还空着又遇到新标题时，代码直接把两行拼起来（本意是接「第三章 / 风起」这种分两行写的标题），**但没有判重**。txt 开头带一整页目录的书，就会拼成 `第1章 … 第25章 … 第1章`。
+>
+> 现在同一套规则用在桌面版和网页版：去掉空格后互相包含的，取更完整的那条；同一类（章/回/节）号码相同，取更完整的；号码不同，用新的（旧的没有正文，属于目录残留，直接丢掉）；卷后跟章、或者取不到号码，仍按原来的方式拼接，不冒险。
+>
+> 验证方式是拿**线上 1.5.7 的代码当基准**，11 种写法逐字对比（正常书、目录连排、两行标题、卷+章、正文提到章号、方括号标题、全角数字、阿拉伯数字、行首全角空格、盗版站噪声、121 章长篇）：**10 种完全一致**，只有「目录连排」那一个的章名变了 —— 旧版 `第1章 标题1 第2章 … 第25章 标题25 第1章 标题1`，新版 `第1章 标题1`，**正文 83 字一字未动**。桌面版与网页版逐例相同。自带测试：核心 8 组 0 失败、清洗一致性 36 项、网页核心 56 项、无头浏览器冒烟 23 项，全绿。
+>
+> 顺手补一个**打不开**的坑：配置文件现在只认字典。以前赶上断电、网盘同步冲突，或别的程序占用了 `~/.deshelf_config.json` 这个名字，`json.load` 会返回字符串或数组，`cfg.get` 直接抛异常，双击没反应。现在读不到合法字典就当没有配置。
+>
+> 旧版都留在 Releases 里，**v1.5.7 的安装包一个字节没动**，随时可以下回去。
+>
 > **v1.5.7** · 新增两条**段落修复**规则，专治「一句话没写完就换行」「收尾引号自己占一行」。这类毛病不是阅读器的锅——是盗版站抓取时**按手机屏宽硬断**留下的：一段话被切成十几行，`衣服湿答` / `答的。”`、`”，大宝还觉` / `得午后潮热` 这种断在词中间、字中间的都见过。
 >
 > ① **标点单独占一行（默认关）**：整行只有一个收尾引号、句号或逗号的，接回上一行末尾。**省略号、破折号独占一行一律不动**——290 本真实样本里这类共 153 行，多数是作者故意用它表示沉默、停顿（有一本 25 行全是「……」）；挡掉这些之后，规则只会落在真正的坏行上。默认关闭，是因为它属于"替你改正文"，请先预览再勾。
@@ -159,7 +169,7 @@ Mac 上用 Chrome / Edge 打开，可以授权整个文件夹、把结果写回�
 - 简体行 0 误删；
 - 22 000 行耗时 1.21 秒（单线程）。
 
-产物：`DeShelf-v1.5.5.exe` 14.85 MB（PyInstaller onefile），网页版单文件 0.16 MB，均不联网。
+产物：`DeShelf-v1.5.8.exe` 14.86 MB（PyInstaller onefile），网页版单文件 0.16 MB，均不联网。
 
 ### 免责声明
 
@@ -229,6 +239,16 @@ Mac 上用 Chrome / Edge 打开，可以授权整个文件夹、把结果写回�
 ## English
 
 > Local TXT organizing tool — scan · clean · split · **export EPUB / TXT**
+>
+> **v1.5.8** · Fixes a chapter **title swallowing an entire table of contents**. What looked like duplicated chapter numbers was one title holding the whole TOC. When its title buffer was still empty and another title line arrived, the splitter concatenated the two — intended for titles written across two lines (`第三章` / `风起`), but with **no de-duplication**, so a book that opens with a page of contents produced `第1章 … 第25章 … 第1章`.
+>
+> The rule is now identical in the desktop and web builds: if one title (whitespace removed) contains the other, keep the longer; same class (章/回/节) with the same number, keep the longer; same class with a different number, take the new one (the old has no body — TOC residue); a volume followed by a chapter, or no number at all, still concatenates as before.
+>
+> Verified with **the shipped 1.5.7 code as the baseline** across 11 layouts (plain book, contents page, two-line titles, volume + chapter, chapter numbers quoted inside prose, bracketed titles, full-width digits, Arabic digits, leading ideographic space, pirate-site noise, a 121-chapter book): **10 are identical character for character**; only the contents case changed, from `第1章 标题1 第2章 … 第25章 标题25 第1章 标题1` to `第1章 标题1`, with the body untouched. Desktop and web output match case by case. Suites: 8 core groups 0 failures, 36 cleaning-parity checks, 56 web-core checks, 23 headless-browser smoke items — all green.
+>
+> Also fixed a **won't-start** case: config loading accepts a dict only. If power loss, a cloud-sync conflict, or another program claims `~/.deshelf_config.json`, `json.load` can return a string or a list, `cfg.get` throws, and double-clicking does nothing.
+>
+> Older builds stay on the Releases page — the v1.5.7 installer is byte-for-byte untouched and can still be downloaded.
 >
 > **v1.5.7** · Two new **paragraph-repair** rules for text where a sentence breaks mid-way and a closing quote sits alone on its own line. This is not the reader's fault — it is what happens when a scraper **hard-wraps at phone width**: one paragraph gets cut into a dozen lines, and the breaks land inside words (`衣服湿答` / `答的。”`) and inside clauses (`”，大宝还觉` / `得午后潮热`).
 >
@@ -386,7 +406,7 @@ and one traditional copy of each):
 - 0 simplified lines lost;
 - 22,000 lines processed in 1.21 s on a single thread.
 
-Artifacts: `DeShelf-v1.5.5.exe` 14.85 MB (PyInstaller onefile), web version 0.16 MB as a single file,
+Artifacts: `DeShelf-v1.5.8.exe` 14.86 MB (PyInstaller onefile), web version 0.16 MB as a single file,
 both fully offline.
 
 ### Disclaimer
